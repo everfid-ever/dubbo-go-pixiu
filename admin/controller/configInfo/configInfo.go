@@ -484,29 +484,48 @@ func BatchReleaseResource(c *gin.Context) {
 		c.JSON(http.StatusOK, config2.WithError(fromErr))
 		return
 	}
-	// todo Optimize comparison method to reduce time complexity
+
+	// Optimize comparison method to reduce time complexity:
+	// Build an index for published-space resources by the last segment of the key.
+	type toItem struct {
+		key string
+		val string
+	}
+	getLastSegment := func(k string) string {
+		// Equivalent to strings.Split(k, "/")[last], but avoids allocations.
+		if idx := strings.LastIndex(k, "/"); idx >= 0 && idx+1 < len(k) {
+			return k[idx+1:]
+		}
+		return k
+	}
+
+	toIndex := make(map[string]toItem, len(toKList))
+	for i, toK := range toKList {
+		seg := getLastSegment(toK)
+		toIndex[strings.ToLower(seg)] = toItem{
+			key: toK,
+			val: toVList[i],
+		}
+	}
+
 	for i, fromK := range fromKList {
 		fromV := fromVList[i]
-		fromKTmp := strings.Split(fromK, "/")
-		flag := false
-		for j, toK := range toKList {
-			toV := toVList[j]
-			toKTmp := strings.Split(toK, "/")
-			flag = strings.EqualFold(fromKTmp[len(fromKTmp)-1], toKTmp[len(toKTmp)-1])
-			if flag {
-				if !strings.EqualFold(fromV, toV) {
-					err := logic.BRUpdate(toK, fromV)
-					if err != nil {
-						logger.Warnf("Batch Release Resource err, %v\n", err)
-						c.JSON(http.StatusOK, config2.WithError(err))
-						return
-					}
+		seg := getLastSegment(fromK)
+		lookupKey := strings.ToLower(seg)
+
+		if item, ok := toIndex[lookupKey]; ok {
+			// exists in published: update if value differs
+			if !strings.EqualFold(fromV, item.val) {
+				err := logic.BRUpdate(item.key, fromV)
+				if err != nil {
+					logger.Warnf("Batch Release Resource err, %v\n", err)
+					c.JSON(http.StatusOK, config2.WithError(err))
+					return
 				}
-				break
 			}
-		}
-		if !flag {
-			err := logic.BRCreate(fromKTmp[len(fromKTmp)-1], fromV, logic.Resources)
+		} else {
+			// not exists in published: create
+			err := logic.BRCreate(seg, fromV, logic.Resources)
 			if err != nil {
 				logger.Warnf("Batch Release Resource err, %v\n", err)
 				c.JSON(http.StatusOK, config2.WithError(err))
